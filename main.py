@@ -38,7 +38,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
 # ---------------------------------------------------------------------------
