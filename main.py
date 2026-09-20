@@ -1055,7 +1055,9 @@ async def serve_frontend():
     if index.exists():
         return FileResponse(index, media_type="text/html; charset=utf-8")
     return {"ok": True, "service": SERVICE_NAME, "version": VERSION}
-
+@app.head("/", include_in_schema=False)
+async def head_root():
+    return Response(status_code=200)
 
 @app.get("/health")
 async def health():
