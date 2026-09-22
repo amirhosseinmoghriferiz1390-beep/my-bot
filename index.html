@@ -663,11 +663,17 @@ function renderProfile(bot){
 }
 
 /* ---------- load & apply config ---------- */
+function setCheckedIfPresent(id, value){
+  const el = $(id);
+  if (el) el.checked = !!value;
+}
+
 function applyConfig(cfg, bot){
   state.bot = cfg;
-  $('tglEnabled').checked = cfg.enabled !== false;
-  $('tglMenuStart').checked = cfg.show_menu_on_start !== false;
-  $('tglMenuAll').checked = !!cfg.attach_menu_to_all;
+  // These controls may not exist in the current UI. Never access .checked on null.
+  setCheckedIfPresent('tglEnabled', cfg.enabled !== false);
+  setCheckedIfPresent('tglMenuStart', cfg.show_menu_on_start !== false);
+  setCheckedIfPresent('tglMenuAll', !!cfg.attach_menu_to_all);
   renderCommands(cfg.commands || []);
   renderKp('chat', cfg.chat_keypad || []);
   renderKp('inline', cfg.inline_buttons || []);
@@ -690,11 +696,13 @@ async function loadBot(notify){
 /* toggle switches → immediate save */
 ['tglEnabled','tglMenuStart','tglMenuAll'].forEach(id=>{
   document.addEventListener('DOMContentLoaded', ()=>{
-    $(id).addEventListener('change', async ()=>{
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('change', async ()=>{
       if(!getToken() || !state.connected) return;
       const map = {tglEnabled:'enabled', tglMenuStart:'show_menu_on_start', tglMenuAll:'attach_menu_to_all'};
       try{
-        await api('/config', {method:'POST', body:JSON.stringify({token:getToken(), [map[id]]:$(id).checked})});
+        await api('/config', {method:'POST', body:JSON.stringify({token:getToken(), [map[id]]:el.checked})});
         toast('⚙️ ذخیره شد.', 'ok');
       }catch(e){ toast('🔴 '+e.message, 'err'); }
     });
