@@ -521,13 +521,20 @@ async def get_openai() -> Optional[AsyncOpenAI]:
     if not OPENAI_API_KEY:
         return None
     if _openai_client is None:
-        _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        # Keep AI requests from hanging forever on a hosted service.
+        _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=40.0, max_retries=1)
     return _openai_client
 
 
 async def generate_ai_reply(token: str, chat_id: str, user_text: str) -> Optional[str]:
-    """Generate an AI reply for ordinary messages while preserving bot rules."""
-    if not user_text.strip():
+    """Generate an AI reply for ordinary messages.
+
+    This function is deliberately defensive because a failure here must never
+    stop the Rubika polling loop. It logs the real OpenAI error (without the
+    API key) so it can be diagnosed from Render logs.
+    """
+    user_text = (user_text or "").strip()
+    if not user_text:
         return None
 
     client = await get_openai()
@@ -537,40 +544,63 @@ async def generate_ai_reply(token: str, chat_id: str, user_text: str) -> Optiona
 
     cfg = bots.get(token)
     if cfg is None:
+        push_log(token, "error", "تنظیمات ربات برای تولید پاسخ AI پیدا نشد.")
         return None
 
     history_map = cfg.setdefault("ai_history", {})
     history = history_map.setdefault(chat_id, [])
     if not isinstance(history, list):
         history = []
-        history_map[chat_id] = history
 
-    history = [
-        item for item in history
-        if isinstance(item, dict)
-        and item.get("role") in ("user", "assistant")
-        and item.get("content")
-    ][-(AI_HISTORY_MESSAGES * 2):]
+    clean_history = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+            clean_history.append({"role": role, "content": content[:8000]})
+    clean_history = clean_history[-(AI_HISTORY_MESSAGES * 2):]
 
-    input_items = list(history)
-    input_items.append({"role": "user", "content": user_text[:4000]})
+    input_items = clean_history + [{"role": "user", "content": user_text[:4000]}]
+    reply = ""
 
+    # Primary path: OpenAI Responses API.
     try:
-        # Current OpenAI Responses API.
+        push_log(token, "info", f"درخواست AI برای پیام کاربر ارسال شد: {user_text[:120]!r}")
         response = await client.responses.create(
             model=OPENAI_MODEL,
             instructions=AI_SYSTEM_PROMPT,
             input=input_items,
             max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS,
         )
-        reply = (response.output_text or "").strip()
+
+        # Newer SDKs expose output_text directly.
+        reply = str(getattr(response, "output_text", "") or "").strip()
+
+        # Defensive fallback for SDK objects that don't expose output_text.
+        if not reply:
+            output = getattr(response, "output", None) or []
+            parts = []
+            for item in output:
+                content = getattr(item, "content", None)
+                if not content:
+                    continue
+                for part in content:
+                    text = getattr(part, "text", None)
+                    if text:
+                        parts.append(str(text))
+            reply = "".join(parts).strip()
+
+        if reply:
+            push_log(token, "info", f"OpenAI پاسخ تولید کرد ({len(reply)} کاراکتر).")
     except Exception as exc:
-        # Compatibility fallback for SDK/API versions where Responses is unavailable.
-        logger.warning(
-            "OpenAI Responses API failed (%s); trying Chat Completions: %s",
-            mask_token(token),
-            exc,
-        )
+        error_text = str(exc).replace(OPENAI_API_KEY, "[REDACTED]")[:500]
+        push_log(token, "error", f"خطای Responses API: {error_text}")
+        logger.exception("OpenAI Responses API failed (%s)", mask_token(token))
+
+    # Compatibility fallback for older OpenAI SDK/API combinations.
+    if not reply:
         try:
             messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}] + input_items
             completion = await client.chat.completions.create(
@@ -578,65 +608,29 @@ async def generate_ai_reply(token: str, chat_id: str, user_text: str) -> Optiona
                 messages=messages,
                 max_completion_tokens=OPENAI_MAX_OUTPUT_TOKENS,
             )
-            reply = (completion.choices[0].message.content or "").strip()
-        except Exception as exc2:
-            push_log(token, "error", f"خطای OpenAI: {str(exc2)[:250]}")
+            choice = completion.choices[0] if completion.choices else None
+            message = getattr(choice, "message", None) if choice else None
+            reply = str(getattr(message, "content", "") or "").strip()
+            if reply:
+                push_log(token, "info", f"OpenAI Chat Completions پاسخ تولید کرد ({len(reply)} کاراکتر).")
+        except Exception as exc:
+            error_text = str(exc).replace(OPENAI_API_KEY, "[REDACTED]")[:500]
+            push_log(token, "error", f"خطای نهایی OpenAI: {error_text}")
             logger.exception("OpenAI request failed (%s)", mask_token(token))
             return None
 
     if not reply:
-        push_log(token, "warning", "OpenAI پاسخ خالی برگرداند.")
+        push_log(token, "error", "OpenAI پاسخ خالی برگرداند.")
         return None
 
-    history.extend([
+    # Store only successful exchanges.
+    clean_history.extend([
         {"role": "user", "content": user_text[:4000]},
         {"role": "assistant", "content": reply[:8000]},
     ])
-    history_map[chat_id] = history[-(AI_HISTORY_MESSAGES * 2):]
-
-    return reply[:8000]
-
-
-async def rubika(
-    method: str,
-    token: str,
-    data: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    url = f"{API_BASE}/{token}/{method}"
-    client = await get_http()
-    try:
-        response = await client.post(url, json=data or {})
-    except httpx.TimeoutException as exc:
-        raise RuntimeError(f"اتصال به روبیکا timeout شد ({method}).") from exc
-    except httpx.RequestError as exc:
-        raise RuntimeError(f"خطای شبکه در اتصال به روبیکا: {exc}") from exc
-
-    logger.info("Rubika API %s -> HTTP %s (%s)", method, response.status_code, mask_token(token))
-
-    if response.status_code >= 400:
-        body = response.text[:500]
-        raise RuntimeError(f"API روبیکا خطای HTTP {response.status_code} داد. {body}")
-
-    try:
-        result = response.json()
-    except Exception as exc:
-        raise RuntimeError("پاسخ API روبیکا JSON معتبر نیست.") from exc
-
-    if not isinstance(result, dict):
-        raise RuntimeError("پاسخ API روبیکا معتبر نیست.")
-
-    # Rubika sometimes returns {status: "ERROR", ...} with HTTP 200
-    status = str(result.get("status", "")).upper()
-    if status and status not in ("OK", "SUCCESS"):
-        err = (
-            result.get("message")
-            or result.get("error")
-            or result.get("dev_message")
-            or result
-        )
-        raise RuntimeError(f"خطای API روبیکا ({method}): {str(err)[:300]}")
-
-    return result
+    history_map[chat_id] = clean_history[-(AI_HISTORY_MESSAGES * 2):]
+    cfg["updated_at"] = now_iso()
+    return reply
 
 
 def get_result(data: Dict[str, Any]) -> Dict[str, Any]:
