@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -58,6 +59,18 @@ POLL_ERROR_RETRY: float = float(os.getenv("POLL_ERROR_RETRY", "5"))
 MAX_LOGS_PER_BOT: int = int(os.getenv("MAX_LOGS_PER_BOT", "300"))
 MAX_CHATS_PER_BOT: int = int(os.getenv("MAX_CHATS_PER_BOT", "2000"))
 MAX_RECENT_MESSAGES: int = int(os.getenv("MAX_RECENT_MESSAGES", "60"))
+MAX_PROCESSED_UPDATE_KEYS: int = int(os.getenv("MAX_PROCESSED_UPDATE_KEYS", "1000"))
+
+# Never expose the project repository to bot users.
+PROJECT_REPO_URL = "https://github.com/amirhosseinmoghriferiz1390-beep/rubika_bot_builder"
+PROJECT_REPO_PATTERN = re.compile(
+    r"(?:https?://)?(?:www\.)?github\.com/amirhosseinmoghriferiz1390-beep/rubika_bot_builder(?:/[^\s<>()\"]*)?",
+    re.IGNORECASE,
+)
+PROJECT_REPO_MARKDOWN_PATTERN = re.compile(
+    r"\[[^\]]*\]\(\s*(?:https?://)?(?:www\.)?github\.com/amirhosseinmoghriferiz1390-beep/rubika_bot_builder(?:/[^\s)]*)?\s*\)",
+    re.IGNORECASE,
+)
 
 # OpenAI configuration. The API key is read only from the environment.
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "").strip()
@@ -70,7 +83,7 @@ AI_SYSTEM_PROMPT: str = os.getenv(
     "اگر کاربر فارسی صحبت کرد، فارسی پاسخ بده و اگر زبان دیگری استفاده کرد، همان زبان را تا حد امکان حفظ کن.",
 )
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 SERVICE_NAME = "rubika-bot-builder"
 START_TIME = time.time()
 
@@ -105,6 +118,10 @@ bots: Dict[str, Dict[str, Any]] = {}
 tasks: Dict[str, asyncio.Task] = {}
 offsets: Dict[str, Optional[str]] = {}
 bot_logs: Dict[str, Deque[Dict[str, Any]]] = {}
+# Update de-duplication cache. This prevents the same Rubika update from being
+# processed twice when polling/API retries return it again.
+processed_update_keys: Dict[str, Deque[str]] = {}
+processed_update_sets: Dict[str, set[str]] = {}
 _save_lock = asyncio.Lock()
 _http_client: Optional[httpx.AsyncClient] = None
 _openai_client: Optional[AsyncOpenAI] = None
@@ -198,6 +215,63 @@ def touch_chat(token: str, chat_id: str, text: Optional[str], name: Optional[str
         c["name"] = name[:80]
 
 
+def sanitize_user_text(text: Optional[str]) -> str:
+    """Remove the project's GitHub repository link from any outgoing user message."""
+    value = str(text or "")
+    # Remove markdown links first so the URL cannot remain inside []().
+    value = PROJECT_REPO_MARKDOWN_PATTERN.sub("", value)
+    value = PROJECT_REPO_PATTERN.sub("", value)
+    # Also remove a bare repository path if it was written without https://.
+    value = re.sub(
+        r"(?<![A-Za-z0-9_-])amirhosseinmoghriferiz1390-beep/rubika_bot_builder(?:/[^\s<>()\"]*)?",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    # Avoid ugly whitespace after removing a link.
+    value = re.sub(r"[ \t]{2,}", " ", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
+def update_dedup_key(update: Dict[str, Any]) -> str:
+    """Build a stable key for one Rubika update.
+
+    Prefer the update id, then message id, and finally a hash of the complete
+    update. Different real messages with the same text remain distinct when
+    Rubika supplies different ids.
+    """
+    raw_type = str(update.get("type") or update.get("update_type") or "").lower()
+    update_id = find_value(update, ("update_id", "updateId", "update_guid", "updateGuid"))
+    if update_id is not None:
+        return f"update:{raw_type}:{str(update_id)}"
+
+    parsed = extract_update_kind(update)
+    message_id = parsed.get("message_id")
+    chat_id = parsed.get("chat_id")
+    if message_id is not None:
+        return f"message:{raw_type}:{chat_id}:{message_id}"
+
+    canonical = json.dumps(update, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return "hash:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def mark_update_if_new(token: str, update: Dict[str, Any]) -> Tuple[bool, str]:
+    """Return (is_new, key) and remember the update when it is new."""
+    key = update_dedup_key(update)
+    seen = processed_update_sets.setdefault(token, set())
+    order = processed_update_keys.setdefault(token, deque(maxlen=MAX_PROCESSED_UPDATE_KEYS))
+    if key in seen:
+        return False, key
+
+    if len(order) >= MAX_PROCESSED_UPDATE_KEYS:
+        old = order.popleft()
+        seen.discard(old)
+    order.append(key)
+    seen.add(key)
+    return True, key
+
+
 # ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
@@ -214,6 +288,9 @@ def _serializable_bots() -> Dict[str, Any]:
             )[:500]
             chats = dict(items)
         data[token] = {**cfg, "chats": chats, "recent": cfg.get("recent", [])[-30:]}
+        # Persist the bounded de-duplication cache so a quick restart does not
+        # immediately process the same update again.
+        data[token]["_processed_update_keys"] = list(processed_update_keys.get(token, []))[-MAX_PROCESSED_UPDATE_KEYS:]
     return data
 
 
@@ -257,8 +334,14 @@ def load_state() -> None:
             merged["stats"] = {**base["stats"], **(cfg.get("stats") or {})}
             if not isinstance(merged.get("ai_history"), dict):
                 merged["ai_history"] = {}
+            merged.pop("_processed_update_keys", None)
             bots[token] = merged
             bot_logs.setdefault(token, deque(maxlen=MAX_LOGS_PER_BOT))
+            stored_keys = cfg.get("_processed_update_keys") or []
+            if isinstance(stored_keys, list):
+                dq = deque((str(x) for x in stored_keys if x), maxlen=MAX_PROCESSED_UPDATE_KEYS)
+                processed_update_keys[token] = dq
+                processed_update_sets[token] = set(dq)
         off = payload.get("offsets", {})
         if isinstance(off, dict):
             for k, v in off.items():
@@ -876,7 +959,10 @@ async def send_text(
     inline_keypad: Optional[Dict[str, Any]] = None,
     reply_to: Optional[str] = None,
 ) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
+    safe_text = sanitize_user_text(text)
+    if not safe_text:
+        safe_text = "پیام آماده ارسال بود اما محتوای مجاز برای نمایش به کاربر نداشت."
+    payload: Dict[str, Any] = {"chat_id": chat_id, "text": safe_text}
     if chat_keypad:
         payload["chat_keypad"] = chat_keypad
         payload["chat_keypad_type"] = "New"
@@ -884,7 +970,7 @@ async def send_text(
         payload["inline_keypad"] = inline_keypad
     if reply_to:
         payload["reply_to_message_id"] = reply_to
-    logger.info("Sending reply to chat_id=%s (%s): %r", chat_id, mask_token(token), text[:120])
+    logger.info("Sending reply to chat_id=%s (%s): %r", chat_id, mask_token(token), safe_text[:120])
     result = await rubika("sendMessage", token, payload)
     logger.info("sendMessage result (%s): %s", mask_token(token), str(result)[:400])
     return result
@@ -898,6 +984,13 @@ async def handle_update(token: str, update: Dict[str, Any]) -> None:
     cfg = bots.get(token)
     if cfg is None:
         return
+
+    is_new, dedup_key = mark_update_if_new(token, update)
+    if not is_new:
+        logger.info("Duplicate update ignored (%s): %s", mask_token(token), dedup_key[:120])
+        push_log(token, "info", "آپدیت تکراری نادیده گرفته شد.")
+        return
+
     parsed = extract_update_kind(update)
     logger.info("RAW UPDATE (%s): %s", mask_token(token), str(update)[:800])
     push_log(token, "info", f"آپدیت: {str(update)[:300]}")
@@ -1237,6 +1330,8 @@ async def disconnect(request: ConnectRequest):
     await stop_polling(token)
     bots.pop(token, None)
     offsets.pop(token, None)
+    processed_update_keys.pop(token, None)
+    processed_update_sets.pop(token, None)
     # Keep logs for inspection after disconnect? Clear to free memory.
     bot_logs.pop(token, None)
     await save_state()
