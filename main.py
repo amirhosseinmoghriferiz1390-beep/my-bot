@@ -59,18 +59,24 @@ POLL_ERROR_RETRY: float = float(os.getenv("POLL_ERROR_RETRY", "5"))
 MAX_LOGS_PER_BOT: int = int(os.getenv("MAX_LOGS_PER_BOT", "300"))
 MAX_CHATS_PER_BOT: int = int(os.getenv("MAX_CHATS_PER_BOT", "2000"))
 MAX_RECENT_MESSAGES: int = int(os.getenv("MAX_RECENT_MESSAGES", "60"))
-MAX_PROCESSED_UPDATE_KEYS: int = int(os.getenv("MAX_PROCESSED_UPDATE_KEYS", "1000"))
+MAX_PROCESSED_UPDATE_KEYS: int = int(os.getenv("MAX_PROCESSED_UPDATE_KEYS", "10000"))
 
-# Never expose the project repository to bot users.
+# Internal project information must never be disclosed to bot users.
+# These values are server-side only and are not included in normal AI context.
 PROJECT_REPO_URL = "https://github.com/amirhosseinmoghriferiz1390-beep/rubika_bot_builder"
-PROJECT_REPO_PATTERN = re.compile(
-    r"(?:https?://)?(?:www\.)?github\.com/amirhosseinmoghriferiz1390-beep/rubika_bot_builder(?:/[^\s<>()\"]*)?",
-    re.IGNORECASE,
+PROJECT_REPO_MARKERS = (
+    "amirhosseinmoghriferiz1390-beep/rubika_bot_builder",
+    "amirhosseinmoghriferiz1390-beep",
 )
-PROJECT_REPO_MARKDOWN_PATTERN = re.compile(
-    r"\[[^\]]*\]\(\s*(?:https?://)?(?:www\.)?github\.com/amirhosseinmoghriferiz1390-beep/rubika_bot_builder(?:/[^\s)]*)?\s*\)",
-    re.IGNORECASE,
+PROJECT_INTERNAL_TERMS = (
+    "github.com", "github", "git clone", "repository", "repo",
+    "source code", "source-code", "مخزن گیت‌هاب", "مخزن github",
+    "لینک مخزن", "سورس پروژه", "سورس کد", "کد منبع",
 )
+PROJECT_SERVER_URLS = ("my-bot-vwpn.onrender.com",)
+PROJECT_INTERNAL_RESPONSE = "متأسفم، نمی‌توانم اطلاعات داخلی پروژه، مخزن یا سورس آن را ارائه کنم."
+PROJECT_REPO_PATTERN = re.compile(r'https?://[^\s<>()\"]*github\.com/[^\s<>()\"]+', re.IGNORECASE)
+PROJECT_GITHUB_MARKDOWN_PATTERN = re.compile(r"\[[^\]]*\]\(\s*[^)]*github\.com[^)]*\)", re.IGNORECASE)
 
 # OpenAI configuration. The API key is read only from the environment.
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "").strip()
@@ -80,10 +86,12 @@ AI_HISTORY_MESSAGES: int = int(os.getenv("AI_HISTORY_MESSAGES", "8"))
 AI_SYSTEM_PROMPT: str = os.getenv(
     "AI_SYSTEM_PROMPT",
     "تو یک دستیار فارسی‌زبان مفید و محترم هستی. پاسخ‌ها را روشن، کوتاه و کاربردی بده. "
-    "اگر کاربر فارسی صحبت کرد، فارسی پاسخ بده و اگر زبان دیگری استفاده کرد، همان زبان را تا حد امکان حفظ کن.",
+    "اگر کاربر فارسی صحبت کرد، فارسی پاسخ بده و اگر زبان دیگری استفاده کرد، همان زبان را تا حد امکان حفظ کن. "
+    "هرگز اطلاعات داخلی پروژه را افشا نکن؛ از جمله لینک یا آدرس مخزن GitHub، سورس‌کد، آدرس سرور، توکن‌ها، کلیدهای API، متغیرهای محیطی، لاگ‌های داخلی و جزئیات پیاده‌سازی. "
+    "اگر کاربر درباره این اطلاعات پرسید، فقط بگو که نمی‌توانی اطلاعات داخلی پروژه را ارائه کنی و هیچ لینک یا جزئیات داخلی نده.",
 )
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 SERVICE_NAME = "rubika-bot-builder"
 START_TIME = time.time()
 
@@ -122,6 +130,7 @@ bot_logs: Dict[str, Deque[Dict[str, Any]]] = {}
 # processed twice when polling/API retries return it again.
 processed_update_keys: Dict[str, Deque[str]] = {}
 processed_update_sets: Dict[str, set[str]] = {}
+processed_update_locks: Dict[str, asyncio.Lock] = {}
 _save_lock = asyncio.Lock()
 _http_client: Optional[httpx.AsyncClient] = None
 _openai_client: Optional[AsyncOpenAI] = None
@@ -216,19 +225,37 @@ def touch_chat(token: str, chat_id: str, text: Optional[str], name: Optional[str
 
 
 def sanitize_user_text(text: Optional[str]) -> str:
-    """Remove the project's GitHub repository link from any outgoing user message."""
-    value = str(text or "")
-    # Remove markdown links first so the URL cannot remain inside []().
-    value = PROJECT_REPO_MARKDOWN_PATTERN.sub("", value)
-    value = PROJECT_REPO_PATTERN.sub("", value)
-    # Also remove a bare repository path if it was written without https://.
-    value = re.sub(
-        r"(?<![A-Za-z0-9_-])amirhosseinmoghriferiz1390-beep/rubika_bot_builder(?:/[^\s<>()\"]*)?",
-        "",
+    """Prevent internal repository/project information from reaching bot users.
+
+    If an outgoing response contains a repository/internal-project marker,
+    replace the complete response. This prevents surrounding text from
+    revealing project details after a URL is removed.
+    """
+    value = str(text or "").strip()
+    if not value:
+        return ""
+
+    lowered = value.lower()
+
+    if any(marker.lower() in lowered for marker in PROJECT_REPO_MARKERS):
+        return PROJECT_INTERNAL_RESPONSE
+
+    if any(url.lower() in lowered for url in PROJECT_SERVER_URLS):
+        return PROJECT_INTERNAL_RESPONSE
+
+    if any(term.lower() in lowered for term in PROJECT_INTERNAL_TERMS):
+        return PROJECT_INTERNAL_RESPONSE
+
+    if PROJECT_GITHUB_MARKDOWN_PATTERN.search(value) or PROJECT_REPO_PATTERN.search(value):
+        return PROJECT_INTERNAL_RESPONSE
+
+    if re.search(
+        r'(?<![A-Za-z0-9_-])amirhosseinmoghriferiz1390-beep(?:/[^\s<>()\"]+)?',
         value,
         flags=re.IGNORECASE,
-    )
-    # Avoid ugly whitespace after removing a link.
+    ):
+        return PROJECT_INTERNAL_RESPONSE
+
     value = re.sub(r"[ \t]{2,}", " ", value)
     value = re.sub(r"\n{3,}", "\n\n", value)
     return value.strip()
@@ -985,11 +1012,15 @@ async def handle_update(token: str, update: Dict[str, Any]) -> None:
     if cfg is None:
         return
 
-    is_new, dedup_key = mark_update_if_new(token, update)
-    if not is_new:
-        logger.info("Duplicate update ignored (%s): %s", mask_token(token), dedup_key[:120])
-        push_log(token, "info", "آپدیت تکراری نادیده گرفته شد.")
-        return
+    # Serialize update handling per bot. This protects against accidental
+    # duplicate polling tasks and makes the de-duplication check atomic.
+    lock = processed_update_locks.setdefault(token, asyncio.Lock())
+    async with lock:
+        is_new, dedup_key = mark_update_if_new(token, update)
+        if not is_new:
+            logger.info("Duplicate update ignored (%s): %s", mask_token(token), dedup_key[:120])
+            push_log(token, "info", "آپدیت تکراری نادیده گرفته شد.")
+            return
 
     parsed = extract_update_kind(update)
     logger.info("RAW UPDATE (%s): %s", mask_token(token), str(update)[:800])
@@ -1110,9 +1141,11 @@ async def poll_bot(token: str) -> None:
             next_offset = extract_next_offset(data)
             if next_offset:
                 offsets[token] = next_offset
+                # Persist the latest offset so a restart is much less likely to
+                # replay an already-consumed batch. The bounded de-dup cache is
+                # persisted with it as an additional safety net.
+                await save_state()
 
-            # Light persistence of offsets every loop is cheap enough at this rate;
-            # full state saved periodically + on config change.
             await asyncio.sleep(POLL_INTERVAL)
 
         except asyncio.CancelledError:
@@ -1332,6 +1365,7 @@ async def disconnect(request: ConnectRequest):
     offsets.pop(token, None)
     processed_update_keys.pop(token, None)
     processed_update_sets.pop(token, None)
+    processed_update_locks.pop(token, None)
     # Keep logs for inspection after disconnect? Clear to free memory.
     bot_logs.pop(token, None)
     await save_state()
