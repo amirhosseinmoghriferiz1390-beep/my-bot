@@ -59,7 +59,18 @@ MAX_LOGS_PER_BOT: int = int(os.getenv("MAX_LOGS_PER_BOT", "300"))
 MAX_CHATS_PER_BOT: int = int(os.getenv("MAX_CHATS_PER_BOT", "2000"))
 MAX_RECENT_MESSAGES: int = int(os.getenv("MAX_RECENT_MESSAGES", "60"))
 
-VERSION = "2.0.0"
+# OpenAI configuration. The API key is read only from the environment.
+OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-5.6-luna").strip()
+OPENAI_MAX_OUTPUT_TOKENS: int = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "600"))
+AI_HISTORY_MESSAGES: int = int(os.getenv("AI_HISTORY_MESSAGES", "8"))
+AI_SYSTEM_PROMPT: str = os.getenv(
+    "AI_SYSTEM_PROMPT",
+    "تو یک دستیار فارسی‌زبان مفید و محترم هستی. پاسخ‌ها را روشن، کوتاه و کاربردی بده. "
+    "اگر کاربر فارسی صحبت کرد، فارسی پاسخ بده و اگر زبان دیگری استفاده کرد، همان زبان را تا حد امکان حفظ کن.",
+)
+
+VERSION = "2.1.0"
 SERVICE_NAME = "rubika-bot-builder"
 START_TIME = time.time()
 
@@ -96,6 +107,7 @@ offsets: Dict[str, Optional[str]] = {}
 bot_logs: Dict[str, Deque[Dict[str, Any]]] = {}
 _save_lock = asyncio.Lock()
 _http_client: Optional[httpx.AsyncClient] = None
+_openai_client: Optional[AsyncOpenAI] = None
 
 
 def default_bot_config(token: str) -> Dict[str, Any]:
@@ -128,6 +140,7 @@ def default_bot_config(token: str) -> Dict[str, Any]:
             "messages_sent": 0,
             "commands_used": 0,
             "keywords_matched": 0,
+            "ai_replies": 0,
             "buttons_pressed": 0,
             "errors": 0,
             "started_at": now_iso(),
@@ -135,6 +148,7 @@ def default_bot_config(token: str) -> Dict[str, Any]:
         },
         "chats": {},  # chat_id -> {count, first_seen, last_seen, last_text, name}
         "recent": [],  # recent messages [{chat_id, text, reply, at, kind}]
+        "ai_history": {},  # chat_id -> [{role, content}, ...], bounded per chat
         "created_at": now_iso(),
         "updated_at": now_iso(),
     }
@@ -241,6 +255,8 @@ def load_state() -> None:
             merged["token"] = token
             # Ensure nested defaults
             merged["stats"] = {**base["stats"], **(cfg.get("stats") or {})}
+            if not isinstance(merged.get("ai_history"), dict):
+                merged["ai_history"] = {}
             bots[token] = merged
             bot_logs.setdefault(token, deque(maxlen=MAX_LOGS_PER_BOT))
         off = payload.get("offsets", {})
@@ -384,6 +400,88 @@ async def get_http() -> httpx.AsyncClient:
             limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
         )
     return _http_client
+
+
+async def get_openai() -> Optional[AsyncOpenAI]:
+    """Return a shared OpenAI client, or None when AI is not configured."""
+    global _openai_client
+    if not OPENAI_API_KEY:
+        return None
+    if _openai_client is None:
+        _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    return _openai_client
+
+
+async def generate_ai_reply(token: str, chat_id: str, user_text: str) -> Optional[str]:
+    """Generate an AI reply for ordinary messages while preserving bot rules."""
+    if not user_text.strip():
+        return None
+
+    client = await get_openai()
+    if client is None:
+        push_log(token, "warning", "OPENAI_API_KEY تنظیم نشده؛ پاسخ معمولی استفاده شد.")
+        return None
+
+    cfg = bots.get(token)
+    if cfg is None:
+        return None
+
+    history_map = cfg.setdefault("ai_history", {})
+    history = history_map.setdefault(chat_id, [])
+    if not isinstance(history, list):
+        history = []
+        history_map[chat_id] = history
+
+    history = [
+        item for item in history
+        if isinstance(item, dict)
+        and item.get("role") in ("user", "assistant")
+        and item.get("content")
+    ][-(AI_HISTORY_MESSAGES * 2):]
+
+    input_items = list(history)
+    input_items.append({"role": "user", "content": user_text[:4000]})
+
+    try:
+        # Current OpenAI Responses API.
+        response = await client.responses.create(
+            model=OPENAI_MODEL,
+            instructions=AI_SYSTEM_PROMPT,
+            input=input_items,
+            max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS,
+        )
+        reply = (response.output_text or "").strip()
+    except Exception as exc:
+        # Compatibility fallback for SDK/API versions where Responses is unavailable.
+        logger.warning(
+            "OpenAI Responses API failed (%s); trying Chat Completions: %s",
+            mask_token(token),
+            exc,
+        )
+        try:
+            messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}] + input_items
+            completion = await client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=messages,
+                max_completion_tokens=OPENAI_MAX_OUTPUT_TOKENS,
+            )
+            reply = (completion.choices[0].message.content or "").strip()
+        except Exception as exc2:
+            push_log(token, "error", f"خطای OpenAI: {str(exc2)[:250]}")
+            logger.exception("OpenAI request failed (%s)", mask_token(token))
+            return None
+
+    if not reply:
+        push_log(token, "warning", "OpenAI پاسخ خالی برگرداند.")
+        return None
+
+    history.extend([
+        {"role": "user", "content": user_text[:4000]},
+        {"role": "assistant", "content": reply[:8000]},
+    ])
+    history_map[chat_id] = history[-(AI_HISTORY_MESSAGES * 2):]
+
+    return reply[:8000]
 
 
 async def rubika(
@@ -829,6 +927,14 @@ async def handle_update(token: str, update: Dict[str, Any]) -> None:
 
     reply, kind = resolve_reply(cfg, text, button_id)
 
+    # Ordinary messages that did not match a command/keyword are handled by AI.
+    # Existing commands and keyword rules keep their original behavior.
+    if kind == "fallback" and text:
+        ai_reply = await generate_ai_reply(token, chat_id, text)
+        if ai_reply:
+            reply = ai_reply
+            kind = "ai"
+
     # Button press with no text: acknowledge + try keyword match on button label is
     # impossible (we only get button_id). Send a generic helpful reply if auto_reply.
     if kind == "button":
@@ -850,6 +956,8 @@ async def handle_update(token: str, update: Dict[str, Any]) -> None:
         stats["commands_used"] = int(stats.get("commands_used", 0)) + 1
     elif kind == "keyword":
         stats["keywords_matched"] = int(stats.get("keywords_matched", 0)) + 1
+    elif kind == "ai":
+        stats["ai_replies"] = int(stats.get("ai_replies", 0)) + 1
 
     # Typing delay (feels human)
     delay = float(cfg.get("typing_delay", 0) or 0)
@@ -972,9 +1080,12 @@ async def lifespan(app: FastAPI):
     for token in list(tasks.keys()):
         await stop_polling(token)
     await save_state()
-    global _http_client
+    global _http_client, _openai_client
     if _http_client is not None and not _http_client.is_closed:
         await _http_client.aclose()
+    if _openai_client is not None:
+        await _openai_client.close()
+        _openai_client = None
 
 
 app = FastAPI(title="Rubika Bot Builder", version=VERSION, lifespan=lifespan)
@@ -1097,7 +1208,7 @@ async def connect(request: ConnectRequest):
             "welcome", "fallback", "unknown_command", "help_text", "enabled",
             "auto_reply", "typing_delay", "show_menu_on_start", "attach_menu_to_all",
             "commands", "keywords", "chat_keypad", "inline_buttons",
-            "blocked_chats", "stats", "chats", "recent",
+            "blocked_chats", "stats", "chats", "recent", "ai_history",
         ):
             if key in old:
                 base[key] = old[key]
