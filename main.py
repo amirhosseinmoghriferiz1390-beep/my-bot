@@ -91,7 +91,7 @@ AI_SYSTEM_PROMPT: str = os.getenv(
     "اگر کاربر درباره این اطلاعات پرسید، فقط بگو که نمی‌توانی اطلاعات داخلی پروژه را ارائه کنی و هیچ لینک یا جزئیات داخلی نده.",
 )
 
-VERSION = "2.4.0"
+VERSION = "2.4.1"
 SERVICE_NAME = "rubika-bot-builder"
 START_TIME = time.time()
 
@@ -1054,14 +1054,21 @@ async def handle_update(token: str, update: Dict[str, Any]) -> None:
 
     reply, kind = resolve_reply(cfg, text, button_id)
 
-    # AI is the final handler for ordinary text. Commands and keyword rules
-    # always keep priority, preserving the existing bot-builder behavior.
-    # AI also works when auto_reply is off, as long as ai_enabled is on.
+    # AI is the final handler for ALL ordinary text that did not match a
+    # command/keyword rule. The old fallback must never be sent before AI.
+    # This is intentionally independent of auto_reply so the AI is the actual
+    # response engine for normal messages.
     if text and kind in ("fallback", "silent") and cfg.get("ai_enabled", True):
         ai_reply = await generate_ai_reply(token, chat_id, text)
         if ai_reply:
             reply = ai_reply
             kind = "ai"
+        else:
+            # Do not silently send the old "پیامت دریافت شد" fallback when AI
+            # failed. Keep the failure visible in logs instead.
+            reply = None
+            kind = "ai_error"
+            stats["errors"] = int(stats.get("errors", 0)) + 1
 
     # Button press with no text: acknowledge + try keyword match on button label is
     # impossible (we only get button_id). Send a generic helpful reply if auto_reply.
@@ -1086,6 +1093,8 @@ async def handle_update(token: str, update: Dict[str, Any]) -> None:
         stats["keywords_matched"] = int(stats.get("keywords_matched", 0)) + 1
     elif kind == "ai":
         stats["ai_replies"] = int(stats.get("ai_replies", 0)) + 1
+    elif kind == "ai_error":
+        push_log(token, "error", "پاسخ AI ساخته نشد؛ متن پیام ارسال نشد.")
 
     # Typing delay (feels human)
     delay = float(cfg.get("typing_delay", 0) or 0)
@@ -1312,6 +1321,24 @@ async def health():
         "uptime_seconds": round(time.time() - START_TIME, 1),
         "bots_count": len(bots),
         "running_tasks": sum(1 for t in tasks.values() if not t.done()),
+        "openai_configured": bool(OPENAI_API_KEY),
+        "openai_model": OPENAI_MODEL,
+    }
+
+
+@app.get("/ai-status")
+async def ai_status():
+    """Safe diagnostic endpoint: never exposes the API key."""
+    return {
+        "ok": True,
+        "configured": bool(OPENAI_API_KEY),
+        "model": OPENAI_MODEL,
+        "key_length": len(OPENAI_API_KEY) if OPENAI_API_KEY else 0,
+        "message": (
+            "OPENAI_API_KEY در محیط سرور تنظیم شده است."
+            if OPENAI_API_KEY
+            else "OPENAI_API_KEY در محیط سرور تنظیم نشده است."
+        ),
     }
 
 
