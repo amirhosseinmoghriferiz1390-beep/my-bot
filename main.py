@@ -91,7 +91,7 @@ AI_SYSTEM_PROMPT: str = os.getenv(
     "اگر کاربر درباره این اطلاعات پرسید، فقط بگو که نمی‌توانی اطلاعات داخلی پروژه را ارائه کنی و هیچ لینک یا جزئیات داخلی نده.",
 )
 
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 SERVICE_NAME = "rubika-bot-builder"
 START_TIME = time.time()
 
@@ -100,6 +100,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 logger = logging.getLogger(SERVICE_NAME)
+logger.info("OpenAI configuration: %s", "configured" if OPENAI_API_KEY else "NOT CONFIGURED")
 
 
 def mask_token(token: str) -> str:
@@ -145,6 +146,7 @@ def default_bot_config(token: str) -> Dict[str, Any]:
         "help_text": "",  # empty => auto-generated from commands
         "enabled": True,
         "auto_reply": True,
+        "ai_enabled": True,
         "typing_delay": 0.3,
         "show_menu_on_start": True,
         "attach_menu_to_all": False,
@@ -443,6 +445,7 @@ class ConfigRequest(BaseModel):
     help_text: Optional[str] = Field(default=None, max_length=4000)
     enabled: Optional[bool] = None
     auto_reply: Optional[bool] = None
+    ai_enabled: Optional[bool] = None
     typing_delay: Optional[float] = Field(default=None, ge=0, le=10)
     show_menu_on_start: Optional[bool] = None
     attach_menu_to_all: Optional[bool] = None
@@ -529,7 +532,7 @@ async def generate_ai_reply(token: str, chat_id: str, user_text: str) -> Optiona
 
     client = await get_openai()
     if client is None:
-        push_log(token, "warning", "OPENAI_API_KEY تنظیم نشده؛ پاسخ معمولی استفاده شد.")
+        push_log(token, "error", "OPENAI_API_KEY تنظیم نشده یا در محیط Render در دسترس نیست.")
         return None
 
     cfg = bots.get(token)
@@ -1051,9 +1054,10 @@ async def handle_update(token: str, update: Dict[str, Any]) -> None:
 
     reply, kind = resolve_reply(cfg, text, button_id)
 
-    # Ordinary messages that did not match a command/keyword are handled by AI.
-    # Existing commands and keyword rules keep their original behavior.
-    if kind == "fallback" and text:
+    # AI is the final handler for ordinary text. Commands and keyword rules
+    # always keep priority, preserving the existing bot-builder behavior.
+    # AI also works when auto_reply is off, as long as ai_enabled is on.
+    if text and kind in ("fallback", "silent") and cfg.get("ai_enabled", True):
         ai_reply = await generate_ai_reply(token, chat_id, text)
         if ai_reply:
             reply = ai_reply
@@ -1268,6 +1272,7 @@ def public_bot_summary(token: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         "running": bool(task is not None and not task.done()),
         "enabled": cfg.get("enabled", True),
         "auto_reply": cfg.get("auto_reply", True),
+        "ai_enabled": cfg.get("ai_enabled", True),
         "bot": cfg.get("bot", {}),
         "stats": {
             **cfg.get("stats", {}),
@@ -1332,7 +1337,7 @@ async def connect(request: ConnectRequest):
         # Preserve user settings on reconnect
         for key in (
             "welcome", "fallback", "unknown_command", "help_text", "enabled",
-            "auto_reply", "typing_delay", "show_menu_on_start", "attach_menu_to_all",
+            "auto_reply", "ai_enabled", "typing_delay", "show_menu_on_start", "attach_menu_to_all",
             "commands", "keywords", "chat_keypad", "inline_buttons",
             "blocked_chats", "stats", "chats", "recent", "ai_history",
         ):
