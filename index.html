@@ -299,9 +299,9 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:12px}
   <!-- ══════════ HERO ══════════ -->
   <div class="hero">
     <h2>ربات روبیکای خودت را مثل یک <em>ستاره مد</em> بساز ✦</h2>
-    <p>اتصال · دستورات · کلیدواژه‌ها · دکمه‌ها · کاربران · همگانی · مانیتور زنده</p>
+    <p>اتصال · دستورات · هوش مصنوعی · دکمه‌ها · کاربران · همگانی · مانیتور زنده</p>
     <div class="hero-badges">
-      <span class="badge">⚡ پاسخ خودکار</span>
+      <span class="badge">⚡ پاسخ هوش مصنوعی</span>
       <span class="badge cyan">🔘 کیبورد و دکمه شیشه‌ای</span>
       <span class="badge pink">📣 پیام همگانی</span>
       <span class="badge gold">📊 آمار زنده</span>
@@ -343,11 +343,9 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:12px}
         <div class="phone">
           <div class="notch"></div>
           <div class="screen">
-            <div class="bubble user">/start</div>
-            <div class="bubble bot" id="pvWelcome">سلام! 👋</div>
+            <div class="bubble user">سلام ربات!</div>
+            <div class="bubble bot">پاسخ توسط هوش مصنوعی تولید می‌شود 🤖</div>
             <div class="pk-row" id="pvKeys"></div>
-            <div class="bubble user" id="pvUserQ">سلام ربات!</div>
-            <div class="bubble bot" id="pvFallback">پیامت دریافت شد 🤖</div>
           </div>
         </div>
       </div>
@@ -359,9 +357,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:12px}
     <h2>🎛️ استودیوی ربات</h2>
     <p class="sub">همه‌ی امکانات ربات — اول ربات را متصل کن، بعد هر بخش را تنظیم و ذخیره کن.</p>
     <div class="tabs" id="tabs">
-      <button class="tab-btn active" data-tab="replies">💬 پاسخ‌ها</button>
-      <button class="tab-btn" data-tab="commands">⌨️ دستورات</button>
-      <button class="tab-btn" data-tab="keywords">🔎 کلیدواژه‌ها</button>
+      <button class="tab-btn active" data-tab="commands">⌨️ دستورات</button>
       <button class="tab-btn" data-tab="buttons">🔘 دکمه‌ها</button>
       <button class="tab-btn" data-tab="users">👥 کاربران</button>
       <button class="tab-btn" data-tab="send">📣 ارسال و همگانی</button>
@@ -369,53 +365,13 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:12px}
       <button class="tab-btn" data-tab="backup">💾 بکاپ</button>
     </div>
 
-    <!-- ── REPLIES ── -->
-    <div class="tab-pane active" id="pane-replies">
-      <div class="grid2">
-        <div>
-          <label class="lbl" for="welcome">👋 پیام خوش‌آمد (/start)</label>
-          <textarea id="welcome" oninput="preview()"></textarea>
-          <div class="emoji-bar" data-for="welcome"></div>
-          <label class="lbl" for="fallback">💬 پاسخ پیش‌فرض پیام‌ها</label>
-          <textarea id="fallback" style="min-height:80px" oninput="preview()"></textarea>
-          <div class="emoji-bar" data-for="fallback"></div>
-        </div>
-        <div>
-          <label class="lbl" for="unknown">🤔 پاسخ دستور ناشناخته</label>
-          <textarea id="unknown" style="min-height:70px"></textarea>
-          <label class="lbl" for="helptext">📖 متن /help (خالی = خودکار)</label>
-          <textarea id="helptext" style="min-height:70px" placeholder="خالی بگذار تا خودکار از روی دستورات ساخته شود…"></textarea>
-          <label class="lbl" for="delay">⏱️ تأخیر پاسخ (ثانیه، حس انسانی)</label>
-          <input id="delay" type="number" min="0" max="10" step="0.1" value="0.3" dir="ltr">
-          <div class="toggle-line"><label class="switch"><input type="checkbox" id="tglEnabled" checked><span class="slider"></span></label><div><b>ربات فعال باشد</b><small>خاموش = هیچ پاسخی نمی‌دهد (ولی متصل می‌ماند)</small></div></div>
-          <div class="toggle-line"><label class="switch"><input type="checkbox" id="tglAuto" checked><span class="slider"></span></label><div><b>پاسخ خودکار</b><small>خاموش = فقط دستورات جواب می‌گیرند</small></div></div>
-          <div class="toggle-line"><label class="switch"><input type="checkbox" id="tglMenuStart" checked><span class="slider"></span></label><div><b>نمایش منو در /start</b><small>دکمه‌های تب «دکمه‌ها» همراه خوش‌آمد ارسال شود</small></div></div>
-          <div class="toggle-line"><label class="switch"><input type="checkbox" id="tglMenuAll"><span class="slider"></span></label><div><b>چسباندن منو به همه پاسخ‌ها</b><small>کیبورد همیشه زیر پیام‌ها باشد</small></div></div>
-        </div>
-      </div>
-      <div class="btn-row">
-        <button class="btn green" id="btnSaveReplies" onclick="saveReplies()">💾 ذخیره پاسخ‌ها</button>
-        <button class="btn ghost" onclick="loadBot(true)">🔄 بارگذاری از سرور</button>
-      </div>
-    </div>
-
     <!-- ── COMMANDS ── -->
     <div class="tab-pane" id="pane-commands">
-      <p class="sub">دستورات با <span class="mono">/</span> شروع می‌شوند. مثلا <span class="mono">/help</span> و <span class="mono">/about</span>. پاسخ خالی برای <span class="mono">/help</span> یعنی «راهنمای خودکار».</p>
+      <p class="sub">دستورات با <span class="mono">/</span> شروع می‌شوند. پاسخ این دستورات توسط هوش مصنوعی تولید می‌شود.</p>
       <div id="cmdList"></div>
       <div class="btn-row">
         <button class="btn sm" onclick="addCommand()">➕ افزودن دستور</button>
         <button class="btn green sm" id="btnSaveCmd" onclick="saveCommands()">💾 ذخیره دستورات</button>
-      </div>
-    </div>
-
-    <!-- ── KEYWORDS ── -->
-    <div class="tab-pane" id="pane-keywords">
-      <p class="sub">اگر پیام کاربر شامل کلیدواژه باشد، پاسخش ارسال می‌شود. حالت تطبیق: <b>شامل</b> / <b>دقیق</b> / <b>شروع با</b>.</p>
-      <div id="kwList"></div>
-      <div class="btn-row">
-        <button class="btn sm" onclick="addKeyword()">➕ افزودن کلیدواژه</button>
-        <button class="btn green sm" id="btnSaveKw" onclick="saveKeywords()">💾 ذخیره کلیدواژه‌ها</button>
       </div>
     </div>
 
@@ -492,7 +448,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:12px}
       <div class="grid2">
         <div>
           <label class="lbl">📥 خروجی (بکاپ JSON)</label>
-          <p class="hint">همه تنظیمات ربات (پاسخ‌ها، دستورات، کلیدواژه‌ها، دکمه‌ها…) در یک فایل ذخیره می‌شود.</p>
+          <p class="hint">تنظیمات ربات (دستورات، دکمه‌ها و سایر تنظیمات) در یک فایل ذخیره می‌شود.</p>
           <button class="btn block" onclick="exportCfg()">📥 دانلود بکاپ</button>
         </div>
         <div>
@@ -516,7 +472,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:12px}
     <h2>🚀 امکانات استودیو</h2>
     <p class="sub">هر چه برای یک ربات حرفه‌ای لازم است — در یک صفحه.</p>
     <div class="grid3" style="font-size:13.5px;line-height:2.4">
-      <div>✅ اتصال چندرباته با توکن<br>✅ پاسخ /start و خوش‌آمد<br>✅ دستورات سفارشی نامحدود<br>✅ کلیدواژه هوشمند (۳ حالت)</div>
+      <div>✅ اتصال چندرباته با توکن<br></div>
       <div>✅ کیبورد + دکمه شیشه‌ای<br>✅ مدیریت و بلاک کاربران<br>✅ ارسال تکی و همگانی<br>✅ آمار و مانیتور زنده ⚡</div>
       <div>✅ بکاپ و بازیابی JSON<br>✅ ذخیره‌سازی ماندگار سرور<br>✅ پیش‌نمایش موبایل 📱<br>✅ تم تیره/روشن 🌙☀️</div>
     </div>
@@ -639,12 +595,13 @@ function initEmoji(){
 
 /* ---------- preview ---------- */
 function preview(){
-  $('pvWelcome').textContent = $('welcome').value || 'سلام! 👋';
-  $('pvFallback').textContent = $('fallback').value || '…';
   const rows = readKp('chat').slice(0,3);
-  $('pvKeys').innerHTML = rows.map(r =>
-    `<div class="pk-row" style="width:100%">` + r.slice(0,3).map(b=>`<div class="pk-btn">${escapeHtml(b)}</div>`).join('') + `</div>`
-  ).join('');
+  const pvKeys = $('pvKeys');
+  if(pvKeys){
+    pvKeys.innerHTML = rows.map(r =>
+      `<div class="pk-row" style="width:100%">` + r.slice(0,3).map(b=>`<div class="pk-btn">${escapeHtml(b)}</div>`).join('') + `</div>`
+    ).join('');
+  }
 }
 
 /* ---------- server test ---------- */
@@ -708,17 +665,10 @@ function renderProfile(bot){
 /* ---------- load & apply config ---------- */
 function applyConfig(cfg, bot){
   state.bot = cfg;
-  $('welcome').value = cfg.welcome ?? '';
-  $('fallback').value = cfg.fallback ?? '';
-  $('unknown').value = cfg.unknown_command ?? '';
-  $('helptext').value = cfg.help_text ?? '';
-  $('delay').value = cfg.typing_delay ?? 0.3;
   $('tglEnabled').checked = cfg.enabled !== false;
-  $('tglAuto').checked = cfg.auto_reply !== false;
   $('tglMenuStart').checked = cfg.show_menu_on_start !== false;
   $('tglMenuAll').checked = !!cfg.attach_menu_to_all;
   renderCommands(cfg.commands || []);
-  renderKeywords(cfg.keywords || []);
   renderKp('chat', cfg.chat_keypad || []);
   renderKp('inline', cfg.inline_buttons || []);
   preview();
@@ -737,31 +687,12 @@ async function loadBot(notify){
   }catch(e){ if(notify) toast('🔴 '+e.message, 'err'); }
 }
 
-async function saveReplies(){
-  const token = getToken();
-  if(!token){ toast('⚠️ ابتدا متصل شو.', 'err'); return; }
-  const btn = $('btnSaveReplies');
-  setLoad(btn, true, 'در حال ذخیره…');
-  try{
-    await api('/config', {method:'POST', body:JSON.stringify({
-      token,
-      welcome:$('welcome').value, fallback:$('fallback').value,
-      unknown_command:$('unknown').value, help_text:$('helptext').value,
-      typing_delay:parseFloat($('delay').value||'0'),
-      enabled:$('tglEnabled').checked, auto_reply:$('tglAuto').checked,
-      show_menu_on_start:$('tglMenuStart').checked, attach_menu_to_all:$('tglMenuAll').checked,
-    })});
-    toast('🟢 پاسخ‌ها ذخیره شد.', 'ok'); preview();
-  }catch(e){ toast('🔴 '+e.message, 'err'); }
-  finally{ setLoad(btn, false); }
-}
-
 /* toggle switches → immediate save */
-['tglEnabled','tglAuto','tglMenuStart','tglMenuAll'].forEach(id=>{
+['tglEnabled','tglMenuStart','tglMenuAll'].forEach(id=>{
   document.addEventListener('DOMContentLoaded', ()=>{
     $(id).addEventListener('change', async ()=>{
       if(!getToken() || !state.connected) return;
-      const map = {tglEnabled:'enabled', tglAuto:'auto_reply', tglMenuStart:'show_menu_on_start', tglMenuAll:'attach_menu_to_all'};
+      const map = {tglEnabled:'enabled', tglMenuStart:'show_menu_on_start', tglMenuAll:'attach_menu_to_all'};
       try{
         await api('/config', {method:'POST', body:JSON.stringify({token:getToken(), [map[id]]:$(id).checked})});
         toast('⚙️ ذخیره شد.', 'ok');
@@ -774,23 +705,21 @@ async function saveReplies(){
 function renderCommands(list){
   const box = $('cmdList'); box.innerHTML = '';
   if(!list.length) box.innerHTML = '<div class="empty">دستوری نیست — یکی اضافه کن.</div>';
-  list.forEach((c,i)=> box.appendChild(cmdItem(c.trigger||'', c.response||'')));
+  list.forEach(c=> box.appendChild(cmdItem(c.trigger||'')));
 }
-function cmdItem(trig, resp){
+function cmdItem(trig){
   const d = document.createElement('div'); d.className='item';
   d.innerHTML = `
     <div class="item-head"><b>⌨️ دستور</b><button class="btn danger sm x" onclick="this.closest('.item').remove()">✕ حذف</button></div>
     <div class="row">
       <input type="text" dir="ltr" class="c-trig" placeholder="/about" value="${escapeHtml(trig)}">
-      <input type="text" class="c-resp" placeholder="پاسخ…" value="${escapeHtml(resp)}" style="flex:3">
     </div>`;
   return d;
 }
 function addCommand(){ $('cmdList').appendChild(cmdItem('/','')); }
 function readCommands(){
   return [...document.querySelectorAll('#cmdList .item')].map(el=>({
-    trigger:(el.querySelector('.c-trig').value||'').trim(),
-    response:el.querySelector('.c-resp').value||'',
+    trigger:(el.querySelector('.c-trig').value||'').trim()
   })).filter(x=>x.trigger);
 }
 async function saveCommands(){
@@ -800,44 +729,6 @@ async function saveCommands(){
   try{
     await api('/config',{method:'POST',body:JSON.stringify({token, commands:readCommands()})});
     toast('🟢 دستورات ذخیره شد.','ok');
-  }catch(e){ toast('🔴 '+e.message,'err'); } finally{ setLoad(btn,false); }
-}
-
-/* ---------- keywords ---------- */
-const MATCH_FA = {contains:'شامل باشد', exact:'دقیقاً برابر', starts:'شروع شود با'};
-function renderKeywords(list){
-  const box=$('kwList'); box.innerHTML='';
-  if(!list.length) box.innerHTML='<div class="empty">کلیدواژه‌ای نیست — یکی اضافه کن.</div>';
-  list.forEach(k=> box.appendChild(kwItem(k.keyword||'', k.response||'', k.match||'contains')));
-}
-function kwItem(kw, resp, match){
-  const d=document.createElement('div'); d.className='item';
-  d.innerHTML=`
-    <div class="item-head"><b>🔎 کلیدواژه</b><button class="btn danger sm x" onclick="this.closest('.item').remove()">✕ حذف</button></div>
-    <div class="row">
-      <input type="text" class="k-kw" placeholder="سلام" value="${escapeHtml(kw)}">
-      <select class="k-match" style="max-width:170px">
-        ${Object.entries(MATCH_FA).map(([v,l])=>`<option value="${v}" ${v===match?'selected':''}>${l}</option>`).join('')}
-      </select>
-      <input type="text" class="k-resp" placeholder="پاسخ…" value="${escapeHtml(resp)}" style="flex:3">
-    </div>`;
-  return d;
-}
-function addKeyword(){ $('kwList').appendChild(kwItem('','','contains')); }
-function readKeywords(){
-  return [...document.querySelectorAll('#kwList .item')].map(el=>({
-    keyword:(el.querySelector('.k-kw').value||'').trim(),
-    response:el.querySelector('.k-resp').value||'',
-    match:el.querySelector('.k-match').value||'contains',
-  })).filter(x=>x.keyword);
-}
-async function saveKeywords(){
-  const token=getToken();
-  if(!token){ toast('⚠️ ابتدا متصل شو.','err'); return; }
-  const btn=$('btnSaveKw'); setLoad(btn,true,'در حال ذخیره…');
-  try{
-    await api('/config',{method:'POST',body:JSON.stringify({token, keywords:readKeywords()})});
-    toast('🟢 کلیدواژه‌ها ذخیره شد.','ok');
   }catch(e){ toast('🔴 '+e.message,'err'); } finally{ setLoad(btn,false); }
 }
 
