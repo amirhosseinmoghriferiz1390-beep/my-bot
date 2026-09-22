@@ -514,7 +514,7 @@ async def get_openai() -> Optional[AsyncOpenAI]:
     if not OPENAI_API_KEY:
         return None
     if _openai_client is None:
-        _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY, max_retries=0)
     return _openai_client
 
 
@@ -560,6 +560,12 @@ async def generate_ai_reply(token: str, chat_id: str, user_text: str) -> Optiona
         )
         reply = (response.output_text or "").strip()
     except Exception as exc:
+        status_code = getattr(exc, "status_code", None)
+        if status_code == 429:
+            push_log(token, "warning", "OpenAI درخواست را با وضعیت 429 رد کرد؛ محدودیت نرخ/سهمیه/دسترسی را بررسی کنید.")
+            logger.warning("OpenAI 429 (%s): %s", mask_token(token), str(exc)[:300])
+            return None
+
         # Compatibility fallback for SDK/API versions where Responses is unavailable.
         logger.warning(
             "OpenAI Responses API failed (%s); trying Chat Completions: %s",
@@ -575,8 +581,13 @@ async def generate_ai_reply(token: str, chat_id: str, user_text: str) -> Optiona
             )
             reply = (completion.choices[0].message.content or "").strip()
         except Exception as exc2:
-            push_log(token, "error", f"خطای OpenAI: {str(exc2)[:250]}")
-            logger.exception("OpenAI request failed (%s)", mask_token(token))
+            status_code2 = getattr(exc2, "status_code", None)
+            if status_code2 == 429:
+                push_log(token, "warning", "OpenAI درخواست را با وضعیت 429 رد کرد؛ محدودیت نرخ/سهمیه/دسترسی را بررسی کنید.")
+                logger.warning("OpenAI Chat Completions 429 (%s): %s", mask_token(token), str(exc2)[:300])
+            else:
+                push_log(token, "error", f"خطای OpenAI: {str(exc2)[:250]}")
+                logger.exception("OpenAI request failed (%s)", mask_token(token))
             return None
 
     if not reply:
