@@ -87,13 +87,11 @@ AI_SYSTEM_PROMPT: str = os.getenv(
     "AI_SYSTEM_PROMPT",
     "تو یک دستیار فارسی‌زبان مفید و محترم هستی. پاسخ‌ها را روشن، کوتاه و کاربردی بده. "
     "اگر کاربر فارسی صحبت کرد، فارسی پاسخ بده و اگر زبان دیگری استفاده کرد، همان زبان را تا حد امکان حفظ کن. "
-    "به سؤال مشخص کاربر مستقیماً پاسخ بده و برای سؤال‌های مشخص از پاسخ‌های کلی مثل «چطور می‌تونم کمکت کنم؟» استفاده نکن. "
-    "اگر اطلاعات لحظه‌ای در اختیار تو نیست، عدد یا واقعیت ساختگی ارائه نکن و این محدودیت را شفاف بگو. "
     "هرگز اطلاعات داخلی پروژه را افشا نکن؛ از جمله لینک یا آدرس مخزن GitHub، سورس‌کد، آدرس سرور، توکن‌ها، کلیدهای API، متغیرهای محیطی، لاگ‌های داخلی و جزئیات پیاده‌سازی. "
     "اگر کاربر درباره این اطلاعات پرسید، فقط بگو که نمی‌توانی اطلاعات داخلی پروژه را ارائه کنی و هیچ لینک یا جزئیات داخلی نده.",
 )
 
-VERSION = "2.4.2"
+VERSION = "2.4.1"
 SERVICE_NAME = "rubika-bot-builder"
 START_TIME = time.time()
 
@@ -517,6 +515,59 @@ async def get_http() -> httpx.AsyncClient:
     return _http_client
 
 
+async def rubika(method: str, token: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Call the Rubika Bot API using the /v3/{token}/{method} route."""
+    method = str(method or "").strip().strip("/")
+    token = str(token or "").strip()
+
+    if not method:
+        raise ValueError("متد API روبیکا مشخص نشده است.")
+    if not token:
+        raise ValueError("توکن ربات خالی است.")
+
+    client = await get_http()
+    url = f"{API_BASE}/{token}/{method}"
+    body = dict(payload or {})
+
+    try:
+        response = await client.post(
+            url,
+            json=body,
+            headers={"Content-Type": "application/json"},
+        )
+    except httpx.TimeoutException as exc:
+        raise RuntimeError("زمان اتصال به API روبیکا تمام شد.") from exc
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"خطا در اتصال به API روبیکا: {exc}") from exc
+
+    raw_text = response.text[:1200]
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            f"پاسخ نامعتبر از API روبیکا دریافت شد (HTTP {response.status_code}): {raw_text}"
+        ) from exc
+
+    if response.status_code >= 400:
+        safe_body = (
+            json.dumps(data, ensure_ascii=False)[:800]
+            if isinstance(data, (dict, list))
+            else raw_text
+        )
+        raise RuntimeError(f"API روبیکا خطای HTTP {response.status_code}: {safe_body}")
+
+    if not isinstance(data, dict):
+        raise RuntimeError("ساختار پاسخ API روبیکا معتبر نیست.")
+
+    status = str(data.get("status", "") or "").upper()
+    if status and status not in {"OK", "SUCCESS"}:
+        detail = data.get("message") or data.get("error") or data.get("description") or status
+        raise RuntimeError(f"API روبیکا درخواست را رد کرد: {str(detail)[:500]}")
+
+    return data
+
+
 async def get_openai() -> Optional[AsyncOpenAI]:
     """Return a shared OpenAI client, or None when AI is not configured."""
     global _openai_client
@@ -529,31 +580,32 @@ async def get_openai() -> Optional[AsyncOpenAI]:
 
 
 async def generate_ai_reply(token: str, chat_id: str, user_text: str) -> Optional[str]:
-    """Generate an AI reply for ordinary user messages.
+    """Generate an AI reply for ordinary messages.
 
-    Uses the OpenAI Responses HTTP API directly so the bot does not depend on
-    a particular openai-python SDK version. The bot's saved conversation
-    history is kept per chat.
+    This function is deliberately defensive because a failure here must never
+    stop the Rubika polling loop. It logs the real OpenAI error (without the
+    API key) so it can be diagnosed from Render logs.
     """
     user_text = (user_text or "").strip()
     if not user_text:
         return None
 
-    if not OPENAI_API_KEY:
-        push_log(token, "error", "OPENAI_API_KEY در محیط Render تنظیم نشده است.")
+    client = await get_openai()
+    if client is None:
+        push_log(token, "error", "OPENAI_API_KEY تنظیم نشده یا در محیط Render در دسترس نیست.")
         return None
 
     cfg = bots.get(token)
     if cfg is None:
-        push_log(token, "error", "تنظیمات ربات برای پاسخ AI پیدا نشد.")
+        push_log(token, "error", "تنظیمات ربات برای تولید پاسخ AI پیدا نشد.")
         return None
 
     history_map = cfg.setdefault("ai_history", {})
-    history = history_map.get(chat_id, [])
+    history = history_map.setdefault(chat_id, [])
     if not isinstance(history, list):
         history = []
 
-    clean_history: List[Dict[str, str]] = []
+    clean_history = []
     for item in history:
         if not isinstance(item, dict):
             continue
@@ -563,82 +615,74 @@ async def generate_ai_reply(token: str, chat_id: str, user_text: str) -> Optiona
             clean_history.append({"role": role, "content": content[:8000]})
     clean_history = clean_history[-(AI_HISTORY_MESSAGES * 2):]
 
-    messages = clean_history + [{"role": "user", "content": user_text[:4000]}]
-    client = await get_http()
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    payload = {
-        "model": OPENAI_MODEL,
-        "instructions": AI_SYSTEM_PROMPT,
-        "input": messages,
-        "max_output_tokens": OPENAI_MAX_OUTPUT_TOKENS,
-    }
-
-    push_log(token, "info", f"ارسال پیام عادی به هوش مصنوعی: {user_text[:120]!r}")
-
-    try:
-        response = await client.post(
-            "https://api.openai.com/v1/responses",
-            headers=headers,
-            json=payload,
-        )
-    except httpx.TimeoutException as exc:
-        push_log(token, "error", "اتصال به OpenAI با timeout مواجه شد.")
-        logger.exception("OpenAI timeout (%s)", mask_token(token))
-        return None
-    except httpx.RequestError as exc:
-        push_log(token, "error", f"خطا در اتصال HTTP به OpenAI: {str(exc)[:300]}")
-        logger.exception("OpenAI HTTP error (%s)", mask_token(token))
-        return None
-
-    if response.status_code >= 400:
-        body = response.text[:800].replace(OPENAI_API_KEY, "[REDACTED]")
-        push_log(token, "error", f"OpenAI HTTP {response.status_code}: {body}")
-        return None
-
-    try:
-        data = response.json()
-    except ValueError:
-        push_log(token, "error", "OpenAI پاسخ JSON معتبر برنگرداند.")
-        return None
-
+    input_items = clean_history + [{"role": "user", "content": user_text[:4000]}]
     reply = ""
-    output = data.get("output") if isinstance(data, dict) else None
-    if isinstance(output, list):
-        parts: List[str] = []
-        for item in output:
-            if not isinstance(item, dict):
-                continue
-            content = item.get("content")
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if not isinstance(part, dict):
+
+    # Primary path: OpenAI Responses API.
+    try:
+        push_log(token, "info", f"درخواست AI برای پیام کاربر ارسال شد: {user_text[:120]!r}")
+        response = await client.responses.create(
+            model=OPENAI_MODEL,
+            instructions=AI_SYSTEM_PROMPT,
+            input=input_items,
+            max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS,
+        )
+
+        # Newer SDKs expose output_text directly.
+        reply = str(getattr(response, "output_text", "") or "").strip()
+
+        # Defensive fallback for SDK objects that don't expose output_text.
+        if not reply:
+            output = getattr(response, "output", None) or []
+            parts = []
+            for item in output:
+                content = getattr(item, "content", None)
+                if not content:
                     continue
-                if part.get("type") in ("output_text", "text"):
-                    text = part.get("text")
+                for part in content:
+                    text = getattr(part, "text", None)
                     if text:
                         parts.append(str(text))
-        reply = "".join(parts).strip()
+            reply = "".join(parts).strip()
 
-    # Some compatible gateways may expose output_text at the top level.
-    if not reply and isinstance(data, dict):
-        reply = str(data.get("output_text") or "").strip()
+        if reply:
+            push_log(token, "info", f"OpenAI پاسخ تولید کرد ({len(reply)} کاراکتر).")
+    except Exception as exc:
+        error_text = str(exc).replace(OPENAI_API_KEY, "[REDACTED]")[:500]
+        push_log(token, "error", f"خطای Responses API: {error_text}")
+        logger.exception("OpenAI Responses API failed (%s)", mask_token(token))
+
+    # Compatibility fallback for older OpenAI SDK/API combinations.
+    if not reply:
+        try:
+            messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}] + input_items
+            completion = await client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=messages,
+                max_completion_tokens=OPENAI_MAX_OUTPUT_TOKENS,
+            )
+            choice = completion.choices[0] if completion.choices else None
+            message = getattr(choice, "message", None) if choice else None
+            reply = str(getattr(message, "content", "") or "").strip()
+            if reply:
+                push_log(token, "info", f"OpenAI Chat Completions پاسخ تولید کرد ({len(reply)} کاراکتر).")
+        except Exception as exc:
+            error_text = str(exc).replace(OPENAI_API_KEY, "[REDACTED]")[:500]
+            push_log(token, "error", f"خطای نهایی OpenAI: {error_text}")
+            logger.exception("OpenAI request failed (%s)", mask_token(token))
+            return None
 
     if not reply:
         push_log(token, "error", "OpenAI پاسخ خالی برگرداند.")
         return None
 
+    # Store only successful exchanges.
     clean_history.extend([
         {"role": "user", "content": user_text[:4000]},
         {"role": "assistant", "content": reply[:8000]},
     ])
     history_map[chat_id] = clean_history[-(AI_HISTORY_MESSAGES * 2):]
     cfg["updated_at"] = now_iso()
-    push_log(token, "info", f"پاسخ AI تولید شد ({len(reply)} کاراکتر).")
     return reply
 
 
@@ -1055,39 +1099,26 @@ async def handle_update(token: str, update: Dict[str, Any]) -> None:
     stats["last_message_at"] = now_iso()
     touch_chat(token, chat_id, text or (f"[button:{button_id}]" if button_id else ""), sender)
 
-    # Commands and button callbacks keep their existing behavior.
-    # Every ordinary text message goes directly to AI. The generic fallback
-    # is intentionally NOT used for ordinary questions, so a message such as
-    # "قیمت طلا چنده؟" can receive an actual AI answer instead of
-    # "چطور می‌تونم کمکت کنم؟".
-    reply: Optional[str] = None
-    kind = "silent"
+    reply, kind = resolve_reply(cfg, text, button_id)
 
-    if text:
-        raw_text = text.strip()
-        lowered = raw_text.lower()
-        is_command = lowered.startswith("/")
-
-        if is_command:
-            reply, kind = resolve_reply(cfg, raw_text, button_id)
-        elif cfg.get("ai_enabled", True):
-            ai_reply = await generate_ai_reply(token, chat_id, raw_text)
-            if ai_reply:
-                reply = ai_reply
-                kind = "ai"
-            else:
-                # Do not send a generic fallback for ordinary questions.
-                # The real OpenAI error is already in the bot log / Render log.
-                kind = "ai_error"
-                stats["errors"] = int(stats.get("errors", 0)) + 1
-                push_log(token, "error", "پاسخ AI برای پیام عادی تولید نشد؛ fallback عمداً ارسال نشد.")
+    # AI is the final handler for ALL ordinary text that did not match a
+    # command/keyword rule. The old fallback must never be sent before AI.
+    # This is intentionally independent of auto_reply so the AI is the actual
+    # response engine for normal messages.
+    if text and kind in ("fallback", "silent") and cfg.get("ai_enabled", True):
+        ai_reply = await generate_ai_reply(token, chat_id, text)
+        if ai_reply:
+            reply = ai_reply
+            kind = "ai"
         else:
-            # If AI is manually disabled, keep the original rule engine.
-            reply, kind = resolve_reply(cfg, raw_text, button_id)
-    else:
-        reply, kind = resolve_reply(cfg, text, button_id)
+            # Do not silently send the old "پیامت دریافت شد" fallback when AI
+            # failed. Keep the failure visible in logs instead.
+            reply = None
+            kind = "ai_error"
+            stats["errors"] = int(stats.get("errors", 0)) + 1
 
-    # Button press with no text: acknowledge + existing fallback behavior.
+    # Button press with no text: acknowledge + try keyword match on button label is
+    # impossible (we only get button_id). Send a generic helpful reply if auto_reply.
     if kind == "button":
         stats["buttons_pressed"] = int(stats.get("buttons_pressed", 0)) + 1
         if cfg.get("auto_reply", True):
@@ -1098,7 +1129,7 @@ async def handle_update(token: str, update: Dict[str, Any]) -> None:
             return
 
     if reply is None:
-        reason = {"disabled": "ربات غیرفعال است", "silent": "پاسخ خودکار خاموش است", "ai_error": "خطای AI"}.get(kind, kind)
+        reason = {"disabled": "ربات غیرفعال است", "silent": "پاسخ خودکار خاموش است"}.get(kind, kind)
         push_log(token, "info", f"بدون پاسخ ({reason}) — chat={chat_id} text={text!r}")
         record_recent(token, {"chat_id": chat_id, "text": text or "", "reply": None, "at": now_iso(), "kind": kind})
         return
@@ -1109,6 +1140,8 @@ async def handle_update(token: str, update: Dict[str, Any]) -> None:
         stats["keywords_matched"] = int(stats.get("keywords_matched", 0)) + 1
     elif kind == "ai":
         stats["ai_replies"] = int(stats.get("ai_replies", 0)) + 1
+    elif kind == "ai_error":
+        push_log(token, "error", "پاسخ AI ساخته نشد؛ متن پیام ارسال نشد.")
 
     # Typing delay (feels human)
     delay = float(cfg.get("typing_delay", 0) or 0)
@@ -1337,6 +1370,7 @@ async def health():
         "running_tasks": sum(1 for t in tasks.values() if not t.done()),
         "openai_configured": bool(OPENAI_API_KEY),
         "openai_model": OPENAI_MODEL,
+        "rubika_api_base": API_BASE,
     }
 
 
@@ -1354,43 +1388,6 @@ async def ai_status():
             else "OPENAI_API_KEY در محیط سرور تنظیم نشده است."
         ),
     }
-
-
-@app.get("/ai-test")
-async def ai_test(prompt: str = Query("سلام، یک جمله کوتاه درباره ایران بگو.", min_length=1, max_length=1000)):
-    """Safe AI connectivity test without exposing the API key."""
-    if not OPENAI_API_KEY:
-        return {"ok": False, "message": "OPENAI_API_KEY تنظیم نشده است."}
-
-    client = await get_http()
-    try:
-        response = await client.post(
-            "https://api.openai.com/v1/responses",
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": OPENAI_MODEL,
-                "instructions": "پاسخ را کوتاه و به همان زبان کاربر بده.",
-                "input": prompt[:1000],
-                "max_output_tokens": 150,
-            },
-        )
-        if response.status_code >= 400:
-            body = response.text[:800].replace(OPENAI_API_KEY, "[REDACTED]")
-            return {"ok": False, "status_code": response.status_code, "error": body}
-        data = response.json()
-        reply = ""
-        for item in data.get("output", []) if isinstance(data, dict) else []:
-            for part in item.get("content", []) if isinstance(item, dict) else []:
-                if isinstance(part, dict) and part.get("type") in ("output_text", "text") and part.get("text"):
-                    reply += str(part["text"])
-        reply = reply.strip()
-        return {"ok": bool(reply), "model": OPENAI_MODEL, "reply": reply}
-    except Exception as exc:
-        safe = str(exc).replace(OPENAI_API_KEY, "[REDACTED]")[:800]
-        return {"ok": False, "error": safe}
 
 
 # ---------------------------------------------------------------------------
@@ -1421,8 +1418,6 @@ async def connect(request: ConnectRequest):
         ):
             if key in old:
                 base[key] = old[key]
-    # AI should be active automatically whenever a bot is connected.
-    base["ai_enabled"] = True
     base["bot"] = bot_info
     base["updated_at"] = now_iso()
     bots[token] = base
