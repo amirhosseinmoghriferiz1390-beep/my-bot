@@ -87,13 +87,11 @@ AI_SYSTEM_PROMPT: str = os.getenv(
     "AI_SYSTEM_PROMPT",
     "تو یک دستیار فارسی‌زبان مفید و محترم هستی. پاسخ‌ها را روشن، کوتاه و کاربردی بده. "
     "اگر کاربر فارسی صحبت کرد، فارسی پاسخ بده و اگر زبان دیگری استفاده کرد، همان زبان را تا حد امکان حفظ کن. "
-    "به سؤال مشخص کاربر مستقیماً پاسخ بده و برای سؤال‌های مشخص از پاسخ‌های کلی مثل «چطور می‌تونم کمکت کنم؟» استفاده نکن. "
-    "اگر اطلاعات لحظه‌ای در اختیار تو نیست، عدد یا واقعیت ساختگی ارائه نکن و این محدودیت را شفاف بگو. "
     "هرگز اطلاعات داخلی پروژه را افشا نکن؛ از جمله لینک یا آدرس مخزن GitHub، سورس‌کد، آدرس سرور، توکن‌ها، کلیدهای API، متغیرهای محیطی، لاگ‌های داخلی و جزئیات پیاده‌سازی. "
     "اگر کاربر درباره این اطلاعات پرسید، فقط بگو که نمی‌توانی اطلاعات داخلی پروژه را ارائه کنی و هیچ لینک یا جزئیات داخلی نده.",
 )
 
-VERSION = "2.4.2"
+VERSION = "2.4.1"
 SERVICE_NAME = "rubika-bot-builder"
 START_TIME = time.time()
 
@@ -515,6 +513,59 @@ async def get_http() -> httpx.AsyncClient:
             limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
         )
     return _http_client
+
+
+async def rubika(method: str, token: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Call the Rubika Bot API using the /v3/{token}/{method} route."""
+    method = str(method or "").strip().strip("/")
+    token = str(token or "").strip()
+
+    if not method:
+        raise ValueError("متد API روبیکا مشخص نشده است.")
+    if not token:
+        raise ValueError("توکن ربات خالی است.")
+
+    client = await get_http()
+    url = f"{API_BASE}/{token}/{method}"
+    body = dict(payload or {})
+
+    try:
+        response = await client.post(
+            url,
+            json=body,
+            headers={"Content-Type": "application/json"},
+        )
+    except httpx.TimeoutException as exc:
+        raise RuntimeError("زمان اتصال به API روبیکا تمام شد.") from exc
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"خطا در اتصال به API روبیکا: {exc}") from exc
+
+    raw_text = response.text[:1200]
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            f"پاسخ نامعتبر از API روبیکا دریافت شد (HTTP {response.status_code}): {raw_text}"
+        ) from exc
+
+    if response.status_code >= 400:
+        safe_body = (
+            json.dumps(data, ensure_ascii=False)[:800]
+            if isinstance(data, (dict, list))
+            else raw_text
+        )
+        raise RuntimeError(f"API روبیکا خطای HTTP {response.status_code}: {safe_body}")
+
+    if not isinstance(data, dict):
+        raise RuntimeError("ساختار پاسخ API روبیکا معتبر نیست.")
+
+    status = str(data.get("status", "") or "").upper()
+    if status and status not in {"OK", "SUCCESS"}:
+        detail = data.get("message") or data.get("error") or data.get("description") or status
+        raise RuntimeError(f"API روبیکا درخواست را رد کرد: {str(detail)[:500]}")
+
+    return data
 
 
 async def get_openai() -> Optional[AsyncOpenAI]:
@@ -1048,39 +1099,26 @@ async def handle_update(token: str, update: Dict[str, Any]) -> None:
     stats["last_message_at"] = now_iso()
     touch_chat(token, chat_id, text or (f"[button:{button_id}]" if button_id else ""), sender)
 
-    # Commands and explicit buttons keep their existing behavior.
-    # Ordinary text is AI-first: this prevents a generic fallback/keyword
-    # response from replacing the user's actual question. If AI fails, we
-    # fall back to the existing rule engine so current site features remain usable.
-    reply: Optional[str] = None
-    kind = "silent"
+    reply, kind = resolve_reply(cfg, text, button_id)
 
-    if text:
-        raw_text = text.strip()
-        lowered = raw_text.lower()
-        is_command = lowered.startswith("/")
-
-        if is_command:
-            reply, kind = resolve_reply(cfg, raw_text, button_id)
-        elif cfg.get("ai_enabled", True):
-            push_log(token, "info", f"پردازش AI برای پیام عادی شروع شد: {raw_text[:120]!r}")
-            ai_reply = await generate_ai_reply(token, chat_id, raw_text)
-            if ai_reply:
-                reply = ai_reply
-                kind = "ai"
-            else:
-                # Preserve the existing keyword/fallback engine when AI is unavailable.
-                reply, kind = resolve_reply(cfg, raw_text, button_id)
-                push_log(token, "warning", "AI پاسخ نداد؛ استفاده از پاسخ قوانین فعلی انجام شد.")
-                if kind == "fallback":
-                    push_log(token, "error", "برای پیام عادی پاسخ AI ساخته نشد و fallback استفاده شد.")
-                stats["errors"] = int(stats.get("errors", 0)) + 1
+    # AI is the final handler for ALL ordinary text that did not match a
+    # command/keyword rule. The old fallback must never be sent before AI.
+    # This is intentionally independent of auto_reply so the AI is the actual
+    # response engine for normal messages.
+    if text and kind in ("fallback", "silent") and cfg.get("ai_enabled", True):
+        ai_reply = await generate_ai_reply(token, chat_id, text)
+        if ai_reply:
+            reply = ai_reply
+            kind = "ai"
         else:
-            reply, kind = resolve_reply(cfg, raw_text, button_id)
-    else:
-        reply, kind = resolve_reply(cfg, text, button_id)
+            # Do not silently send the old "پیامت دریافت شد" fallback when AI
+            # failed. Keep the failure visible in logs instead.
+            reply = None
+            kind = "ai_error"
+            stats["errors"] = int(stats.get("errors", 0)) + 1
 
-    # Button press with no text: acknowledge + existing fallback behavior.
+    # Button press with no text: acknowledge + try keyword match on button label is
+    # impossible (we only get button_id). Send a generic helpful reply if auto_reply.
     if kind == "button":
         stats["buttons_pressed"] = int(stats.get("buttons_pressed", 0)) + 1
         if cfg.get("auto_reply", True):
@@ -1091,7 +1129,7 @@ async def handle_update(token: str, update: Dict[str, Any]) -> None:
             return
 
     if reply is None:
-        reason = {"disabled": "ربات غیرفعال است", "silent": "پاسخ خودکار خاموش است", "ai_error": "خطای AI"}.get(kind, kind)
+        reason = {"disabled": "ربات غیرفعال است", "silent": "پاسخ خودکار خاموش است"}.get(kind, kind)
         push_log(token, "info", f"بدون پاسخ ({reason}) — chat={chat_id} text={text!r}")
         record_recent(token, {"chat_id": chat_id, "text": text or "", "reply": None, "at": now_iso(), "kind": kind})
         return
@@ -1102,6 +1140,8 @@ async def handle_update(token: str, update: Dict[str, Any]) -> None:
         stats["keywords_matched"] = int(stats.get("keywords_matched", 0)) + 1
     elif kind == "ai":
         stats["ai_replies"] = int(stats.get("ai_replies", 0)) + 1
+    elif kind == "ai_error":
+        push_log(token, "error", "پاسخ AI ساخته نشد؛ متن پیام ارسال نشد.")
 
     # Typing delay (feels human)
     delay = float(cfg.get("typing_delay", 0) or 0)
@@ -1330,6 +1370,7 @@ async def health():
         "running_tasks": sum(1 for t in tasks.values() if not t.done()),
         "openai_configured": bool(OPENAI_API_KEY),
         "openai_model": OPENAI_MODEL,
+        "rubika_api_base": API_BASE,
     }
 
 
@@ -1377,8 +1418,6 @@ async def connect(request: ConnectRequest):
         ):
             if key in old:
                 base[key] = old[key]
-    # AI should be active automatically whenever a bot is connected.
-    base["ai_enabled"] = True
     base["bot"] = bot_info
     base["updated_at"] = now_iso()
     bots[token] = base
