@@ -515,6 +515,59 @@ async def get_http() -> httpx.AsyncClient:
     return _http_client
 
 
+async def rubika(method: str, token: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Call the Rubika Bot API using the /v3/{token}/{method} route."""
+    method = str(method or "").strip().strip("/")
+    token = str(token or "").strip()
+
+    if not method:
+        raise ValueError("متد API روبیکا مشخص نشده است.")
+    if not token:
+        raise ValueError("توکن ربات خالی است.")
+
+    client = await get_http()
+    url = f"{API_BASE}/{token}/{method}"
+    body = dict(payload or {})
+
+    try:
+        response = await client.post(
+            url,
+            json=body,
+            headers={"Content-Type": "application/json"},
+        )
+    except httpx.TimeoutException as exc:
+        raise RuntimeError("زمان اتصال به API روبیکا تمام شد.") from exc
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"خطا در اتصال به API روبیکا: {exc}") from exc
+
+    raw_text = response.text[:1200]
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            f"پاسخ نامعتبر از API روبیکا دریافت شد (HTTP {response.status_code}): {raw_text}"
+        ) from exc
+
+    if response.status_code >= 400:
+        safe_body = (
+            json.dumps(data, ensure_ascii=False)[:800]
+            if isinstance(data, (dict, list))
+            else raw_text
+        )
+        raise RuntimeError(f"API روبیکا خطای HTTP {response.status_code}: {safe_body}")
+
+    if not isinstance(data, dict):
+        raise RuntimeError("ساختار پاسخ API روبیکا معتبر نیست.")
+
+    status = str(data.get("status", "") or "").upper()
+    if status and status not in {"OK", "SUCCESS"}:
+        detail = data.get("message") or data.get("error") or data.get("description") or status
+        raise RuntimeError(f"API روبیکا درخواست را رد کرد: {str(detail)[:500]}")
+
+    return data
+
+
 async def get_openai() -> Optional[AsyncOpenAI]:
     """Return a shared OpenAI client, or None when AI is not configured."""
     global _openai_client
@@ -1317,6 +1370,7 @@ async def health():
         "running_tasks": sum(1 for t in tasks.values() if not t.done()),
         "openai_configured": bool(OPENAI_API_KEY),
         "openai_model": OPENAI_MODEL,
+        "rubika_api_base": API_BASE,
     }
 
 
