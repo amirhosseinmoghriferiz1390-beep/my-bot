@@ -1002,30 +1002,12 @@ def resolve_reply(
     if button_id and not raw:
         return None, "button"  # caller decides generic ack
 
-    # 5) keywords
+    # 5) Ordinary text is handled ONLY by AI.
+    # Configured keyword/fallback replies are not used for normal messages.
     if raw:
-        keywords: List[Dict[str, Any]] = cfg.get("keywords") or []
-        for kw in keywords:
-            if not isinstance(kw, dict):
-                continue
-            key = str(kw.get("keyword", "") or "").strip()
-            if not key:
-                continue
-            mode = str(kw.get("match", "contains") or "contains").lower()
-            kl, tl = key.lower(), lowered
-            hit = (
-                (tl == kl)
-                if mode == "exact"
-                else (tl.startswith(kl) if mode == "starts" else (kl in tl))
-            )
-            if hit:
-                return str(kw.get("response", "") or ""), "keyword"
+        return None, "ai"
 
-    # 6) fallback
-    if not cfg.get("auto_reply", True):
-        return None, "silent"
-    if raw:
-        return cfg.get("fallback", "پیامت دریافت شد. 🤖"), "fallback"
+    # 6) No text and no command/button => nothing to send.
     return None, "silent"
 
 
@@ -1115,14 +1097,14 @@ async def handle_update(token: str, update: Dict[str, Any]) -> None:
     if text:
         raw_text = text.strip()
         lowered = raw_text.lower()
-        is_command = lowered.startswith("/")
 
-        if is_command:
-            # Keep existing commands such as /start, /help and custom commands.
+        if lowered.startswith("/"):
+            # Commands keep their existing behavior.
             reply, kind = resolve_reply(cfg, raw_text, button_id)
         else:
-            # EVERY ordinary text message goes directly to AI.
-            # No keyword/fallback response is allowed to replace the AI answer.
+            # HARD RULE: every ordinary text message goes to AI.
+            # Custom keywords and fallback replies are ignored.
+            push_log(token, "info", f"AI_ONLY_MESSAGE: {raw_text[:120]!r}")
             ai_reply = await generate_ai_reply(token, chat_id, raw_text)
             if ai_reply:
                 reply = ai_reply
@@ -1130,7 +1112,8 @@ async def handle_update(token: str, update: Dict[str, Any]) -> None:
             else:
                 kind = "ai_error"
                 stats["errors"] = int(stats.get("errors", 0)) + 1
-                push_log(token, "error", "برای پیام عادی پاسخ AI تولید نشد؛ پاسخ ثابت ارسال نشد.")
+                # Never send the old/custom fallback when AI fails.
+                reply = "متأسفم، در حال حاضر نتوانستم پاسخ هوش مصنوعی را تولید کنم."
     else:
         reply, kind = resolve_reply(cfg, text, button_id)
 
@@ -1387,6 +1370,17 @@ async def health():
     }
 
 
+@app.get("/ai-mode")
+async def ai_mode():
+    return {
+        "ok": True,
+        "mode": "AI_ONLY_FOR_ORDINARY_TEXT",
+        "custom_keyword_replies_for_normal_text": False,
+        "fallback_replies_for_normal_text": False,
+        "commands_still_enabled": True,
+    }
+
+
 @app.get("/ai-status")
 async def ai_status():
     """Safe diagnostic endpoint: never exposes the API key."""
@@ -1471,6 +1465,8 @@ async def connect(request: ConnectRequest):
     # AI should be active automatically whenever a bot is connected.
     base["ai_enabled"] = True
     base["bot"] = bot_info
+    # AI is always enabled for connected bots.
+    base["ai_enabled"] = True
     base["updated_at"] = now_iso()
     bots[token] = base
     bot_logs.setdefault(token, deque(maxlen=MAX_LOGS_PER_BOT))
